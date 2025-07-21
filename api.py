@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pymongo import MongoClient
@@ -15,10 +15,10 @@ app = FastAPI()
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "*"],  # Allow all for debugging
+    allow_origins=["https://clerkme.site", "http://localhost:8080"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly allow OPTIONS
-    allow_headers=["Content-Type", "Authorization", "*"],  # Allow all headers
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "Origin", "*"],
 )
 
 # MongoDB Atlas connection
@@ -65,10 +65,9 @@ async def signup(request: LoginRequest):
     logger.info(f"Signup successful for email: {request.email}")
     return {"message": "Signup successful"}
 
-# Explicitly handle OPTIONS requests for debugging
 @app.options("/signup")
-async def options_signup():
-    logger.debug("Handling OPTIONS request for /signup")
+async def options_signup(request: Request):
+    logger.debug(f"OPTIONS request received: {request.headers}")
     return {"message": "OPTIONS request allowed"}
 
 if __name__ == "__main__":
