@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pymongo import MongoClient
 import bcrypt
-from datetime import datetime
+import jwt
+from datetime import datetime, timedelta
 import logging
 
 # Setup logging
@@ -15,9 +16,9 @@ app = FastAPI()
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://clerkme.site", "http://localhost:8080"],
+    allow_origins=["https://clerkme.site", "https://www.clerkme.site", "http://localhost:8080"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "Accept", "Origin", "*"],
 )
 
@@ -25,7 +26,7 @@ app.add_middleware(
 MONGO_URI = "mongodb+srv://Beast:Funday.run.moon12@cluster0.3pb1brz.mongodb.net/myapp?retryWrites=true&w=majority&appName=Cluster0"
 try:
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    client.admin.command('ping')  # Test connection
+    client.admin.command('ping')
     logger.info("MongoDB connection successful")
 except Exception as e:
     logger.error(f"MongoDB connection failed: {e}")
@@ -33,37 +34,94 @@ except Exception as e:
 db = client.myapp
 users_collection = db.users
 
-class LoginRequest(BaseModel):
+# JWT settings
+SECRET_KEY = "your-secret-key"  # Change this to a strong secret in production
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+class UserRequest(BaseModel):
+    username: str
     email: str
     password: str
 
-@app.post("/login")
-async def login(request: LoginRequest):
-    logger.debug(f"Login attempt for email: {request.email}")
-    user = users_collection.find_one({"email": request.email})
-    if not user:
-        logger.error(f"User not found: {request.email}")
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    if not bcrypt.checkpw(request.password.encode('utf-8'), user["password"].encode('utf-8')):
-        logger.error(f"Invalid password for email: {request.email}")
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    logger.info(f"Login successful for email: {request.email}")
-    return {"message": "Login successful"}
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class TokenRequest(BaseModel):
+    token: str
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_token(token: str):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return {"username": username, "isAdmin": users_collection.find_one({"username": username})["isAdmin"]}
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.post("/signup")
-async def signup(request: LoginRequest):
-    logger.debug(f"Signup attempt for email: {request.email}")
-    if users_collection.find_one({"email": request.email}):
-        logger.error(f"Email already exists: {request.email}")
-        raise HTTPException(status_code=400, detail="Email already exists")
+async def signup(request: UserRequest):
+    logger.debug(f"Signup attempt for username: {request.username}, email: {request.email}")
+    if users_collection.find_one({"email": request.email}) or users_collection.find_one({"username": request.username}):
+        logger.error(f"User already exists: {request.username}/{request.email}")
+        raise HTTPException(status_code=400, detail="Username or email already exists")
     hashed_password = bcrypt.hashpw(request.password.encode('utf-8'), bcrypt.gensalt())
     users_collection.insert_one({
+        "username": request.username,
         "email": request.email,
         "password": hashed_password.decode('utf-8'),
+        "isAdmin": request.username == "admin",  # Make first user "admin" admin
         "created_at": datetime.now()
     })
-    logger.info(f"Signup successful for email: {request.email}")
+    logger.info(f"Signup successful for username: {request.username}")
     return {"message": "Signup successful"}
+
+@app.post("/login")
+async def login(request: LoginRequest):
+    logger.debug(f"Login attempt for username: {request.username}")
+    user = users_collection.find_one({"username": request.username})
+    if not user:
+        logger.error(f"User not found: {request.username}")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not bcrypt.checkpw(request.password.encode('utf-8'), user["password"].encode('utf-8')):
+        logger.error(f"Invalid password for username: {request.username}")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = create_access_token({"sub": user["username"]})
+    logger.info(f"Login successful for username: {request.username}")
+    return {"token": token, "username": user["username"], "isAdmin": user["isAdmin"]}
+
+@app.post("/validate-token")
+async def validate_token(request: TokenRequest):
+    return verify_token(request.token)
+
+@app.post("/logout")
+async def logout():
+    return {"message": "Logout successful"}
+
+@app.get("/admin/users")
+async def get_users(token: str = Depends(verify_token)):
+    if not token["isAdmin"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    users = list(users_collection.find({}, {"_id": 0, "username": 1, "email": 1}))
+    return users
+
+@app.delete("/admin/users/{username}")
+async def delete_user(username: str, token: str = Depends(verify_token)):
+    if not token["isAdmin"]:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    result = users_collection.delete_one({"username": username})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"message": "User deleted successfully"}
 
 @app.options("/signup")
 async def options_signup(request: Request):
