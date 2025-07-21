@@ -33,11 +33,12 @@ except Exception as e:
     raise
 db = client.myapp
 users_collection = db.users
+sessions_collection = db.sessions  # For session management
 
 # JWT settings
-SECRET_KEY = "your-secret-key"  # Change this to a strong secret in production
+SECRET_KEY = "your-secret-key-12345"  # Change this to a strong secret in production
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 7 * 24 * 60  # 7 days
 
 class UserRequest(BaseModel):
     username: str
@@ -60,18 +61,22 @@ def create_access_token(data: dict):
 
 def verify_token(token: str):
     try:
+        session = sessions_collection.find_one({"token": token})
+        if not session or session["expiresAt"] < datetime.utcnow():
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if not username:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return {"username": username, "isAdmin": users_collection.find_one({"username": username})["isAdmin"]}
+        user = users_collection.find_one({"username": username})
+        return {"username": username, "isAdmin": user["isAdmin"]}
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.post("/signup")
 async def signup(request: UserRequest):
     logger.debug(f"Signup attempt for username: {request.username}, email: {request.email}")
-    if users_collection.find_one({"email": request.email}) or users_collection.find_one({"username": request.username}):
+    if users_collection.find_one({"$or": [{"email": request.email}, {"username": request.username}]}):
         logger.error(f"User already exists: {request.username}/{request.email}")
         raise HTTPException(status_code=400, detail="Username or email already exists")
     hashed_password = bcrypt.hashpw(request.password.encode('utf-8'), bcrypt.gensalt())
@@ -79,7 +84,7 @@ async def signup(request: UserRequest):
         "username": request.username,
         "email": request.email,
         "password": hashed_password.decode('utf-8'),
-        "isAdmin": request.username == "admin",  # Make first user "admin" admin
+        "isAdmin": request.username == "admin",  # Make username "admin" an admin
         "created_at": datetime.now()
     })
     logger.info(f"Signup successful for username: {request.username}")
@@ -96,6 +101,13 @@ async def login(request: LoginRequest):
         logger.error(f"Invalid password for username: {request.username}")
         raise HTTPException(status_code=401, detail="Invalid username or password")
     token = create_access_token({"sub": user["username"]})
+    expires_at = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    sessions_collection.insert_one({
+        "username": user["username"],
+        "token": token,
+        "createdAt": datetime.now(),
+        "expiresAt": expires_at
+    })
     logger.info(f"Login successful for username: {request.username}")
     return {"token": token, "username": user["username"], "isAdmin": user["isAdmin"]}
 
@@ -104,7 +116,10 @@ async def validate_token(request: TokenRequest):
     return verify_token(request.token)
 
 @app.post("/logout")
-async def logout():
+async def logout(request: TokenRequest):
+    result = sessions_collection.delete_one({"token": request.token})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
     return {"message": "Logout successful"}
 
 @app.get("/admin/users")
@@ -121,10 +136,16 @@ async def delete_user(username: str, token: str = Depends(verify_token)):
     result = users_collection.delete_one({"username": username})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="User not found")
+    sessions_collection.delete_many({"username": username})
     return {"message": "User deleted successfully"}
 
 @app.options("/signup")
 async def options_signup(request: Request):
+    logger.debug(f"OPTIONS request received: {request.headers}")
+    return {"message": "OPTIONS request allowed"}
+
+@app.options("/login")
+async def options_login(request: Request):
     logger.debug(f"OPTIONS request received: {request.headers}")
     return {"message": "OPTIONS request allowed"}
 
