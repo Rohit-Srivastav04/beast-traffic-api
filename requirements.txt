@@ -1,0 +1,5 @@
+echo fastapi==0.95.0 > requirements.txt
+echo uvicorn==0.20.0 >> requirements.txt
+echo pymongo==4.3.3 >> requirements.txt
+echo bcrypt==4.0.1 >> requirements.txt
+echo python-multipart==0.0.6 >> requirements.txt
